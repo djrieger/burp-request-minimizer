@@ -60,6 +60,93 @@ class Minimizer(object):
             return self._helpers.buildHttpMessage(new_headers, current_req[cur_request_info.getBodyOffset():])
         return current_req
 
+    def minimize_headers(self, current_req, etalon, invariants, replace):
+        request_info = self._helpers.analyzeRequest(current_req)
+        needed_headers = request_info.getHeaders()
+
+        # Omit first header as it is the HTTP verb
+        relevant_headers = [header for header in request_info.getHeaders()[1:] if not header.lower().startswith(('cookie:', 'connection:', 'host:', 'content-length:'))]
+        for header in relevant_headers:
+            new_headers = list(needed_headers)
+            new_headers.remove(header) 
+
+            req = self._helpers.buildHttpMessage(new_headers, current_req[request_info.getBodyOffset():])
+            resp = self._cb.makeHttpRequest(self._httpServ, req).getResponse()
+
+            if self.compare(etalon, resp, invariants):
+                current_req = req
+                request_info = self._helpers.analyzeRequest(current_req)
+                needed_headers = new_headers
+                self.replace_live(current_req, replace)
+
+        return current_req
+
+    def minimize_params(self, current_req, etalon, invariants, replace):
+        request_info = self._helpers.analyzeRequest(current_req)
+
+        seen_json = request_info.getContentType() == IRequestInfo.CONTENT_TYPE_JSON 
+        seen_xml = request_info.getContentType() == IRequestInfo.CONTENT_TYPE_XML
+
+        for param in request_info.getParameters():
+            param_type = param.getType()
+            if param_type in [IParameter.PARAM_URL, IParameter.PARAM_BODY and IParameter.PARAM_COOKIE]:
+                print("Trying", param_type, param.getName(), param.getValue())
+                req = self._helpers.removeParameter(current_req, param)
+                resp = self._cb.makeHttpRequest(self._httpServ, req).getResponse()
+                if self.compare(etalon, resp, invariants):
+                    print("excluded:", param.getType(), param.getName(), param.getValue())
+                    current_req = self._fix_cookies(req)
+                    self.replace_live(current_req, replace)
+            else:
+                if param_type == IParameter.PARAM_JSON:
+                    seen_json = True
+                elif param_type == IParameter.PARAM_XML:
+                    seen_xml = True
+                else:
+                    print("Unsupported type:", param.getType())
+
+        return (current_req, seen_json, seen_xml)
+
+    def minimize_json_or_xml(self, current_req, etalon, invariants, seen_json, seen_xml, replace):
+        request_info = self._helpers.analyzeRequest(current_req)
+
+        body_offset = request_info.getBodyOffset()
+        headers = current_req[:body_offset].tostring()
+        body = current_req[body_offset:].tostring()
+        if seen_json:
+            print('Minimizing json...')
+            dumpmethod = partial(json.dumps, indent=4)
+            loadmethod = json.loads
+        elif seen_xml:
+            print('Minimizing XML...')
+            dumpmethod = partial(xmltodict.unparse, pretty=True)
+            loadmethod = xmltodict.parse
+        # The minimization routine for both xml and json is the same,
+        # the only difference is with load and dump functions    
+        def check(body):
+            if len(body) == 0 and not seen_json:
+                # XML with and no root node is invalid
+                return False
+            body = str(dumpmethod(body))
+            req = fix_content_type(headers, body)
+            resp = self._cb.makeHttpRequest(self._httpServ, req).getResponse()
+            if self.compare(etalon, resp, invariants):
+                print("Not changed: " + body)
+                self.replace_live(req, replace)
+                return True
+            else:
+                print("Changed: " + body)
+                return False
+        body = loadmethod(body)
+        body = bf_search(body, check)
+        current_req = fix_content_type(headers, str(dumpmethod(body)))
+        
+        return current_req
+
+    # If `replace == True` set the contents of the current repeater view to `request`.
+    def replace_live(self, request, replace):
+        if replace:
+            self._request.setRequest(request)
 
     def _minimize(self, replace):
         try:
@@ -72,56 +159,15 @@ class Minimizer(object):
             invariants = set(self._helpers.analyzeResponseVariations([etalon, etalon2]).getInvariantAttributes())
             invariants -= IGNORED_INVARIANTS
             print("Request invariants", invariants)
-            for param in request_info.getParameters():
-                param_type = param.getType()
-                if param_type in [IParameter.PARAM_URL, IParameter.PARAM_BODY and IParameter.PARAM_COOKIE]:
-                    print("Trying", param_type, param.getName(), param.getValue())
-                    req = self._helpers.removeParameter(current_req, param)
-                    resp = self._cb.makeHttpRequest(self._httpServ, req).getResponse()
-                    if self.compare(etalon, resp, invariants):
-                        print("excluded:", param.getType(), param.getName(), param.getValue())
-                        current_req = self._fix_cookies(req)
-                else:
-                    if param_type == IParameter.PARAM_JSON:
-                        seen_json = True
-                    elif param_type == IParameter.PARAM_XML:
-                        seen_xml = True
-                    else:
-                        print("Unsupported type:", param.getType())
-            seen_json = (request_info.getContentType() == IRequestInfo.CONTENT_TYPE_JSON or seen_json)
-            seen_xml = (request_info.getContentType() == IRequestInfo.CONTENT_TYPE_XML or seen_xml)
+
+            current_req = self.minimize_headers(current_req, etalon, invariants, replace)
+            current_req, seen_json, seen_xml = self.minimize_params(current_req, etalon, invariants, replace)
+
             if seen_json or seen_xml:
-                body_offset = request_info.getBodyOffset()
-                headers = self._request.getRequest()[:body_offset].tostring()
-                body = self._request.getRequest()[body_offset:].tostring()
-                if seen_json:
-                    print('Minimizing json...')
-                    dumpmethod = partial(json.dumps, indent=4)
-                    loadmethod = json.loads
-                elif seen_xml:
-                    print('Minimizing XML...')
-                    dumpmethod = partial(xmltodict.unparse, pretty=True)
-                    loadmethod = xmltodict.parse
-                # The minimization routine for both xml and json is the same,
-                # the only difference is with load and dump functions    
-                def check(body):
-                    if len(body) == 0 and not seen_json:
-                        # XML with and no root node is invalid
-                        return False
-                    body = str(dumpmethod(body))
-                    req = fix_content_type(headers, body)
-                    resp = self._cb.makeHttpRequest(self._httpServ, req).getResponse()
-                    if self.compare(etalon, resp, invariants):
-                        print("Not changed: " + body)
-                        return True
-                    else:
-                        print("Changed: " + body)
-                        return False
-                body = loadmethod(body)
-                body = bf_search(body, check)
-                current_req = fix_content_type(headers, str(dumpmethod(body)))
+                current_req = self.minimize_json_or_xml(current_req, etalon, invariants, seen_json, seen_xml, replace)
+
             if replace:
-                self._request.setRequest(current_req)
+                self.replace_live(current_req, True)
             else:
                 self._cb.sendToRepeater(
                         self._httpServ.getHost(),
