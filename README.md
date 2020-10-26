@@ -1,5 +1,5 @@
 # Request minimizer
-This is a helper tool to perform HTTP request minimization, i.e. delete parameters that are not relevant. Examples include: random ad cookies, cachebusting nonces etc.
+This is a helper tool to perform HTTP request minimization, i.e. delete headers and parameters that are not relevant. Examples include: random ad cookies, cachebusting nonces etc.
 
 # Installation
 
