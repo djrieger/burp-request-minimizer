@@ -2,7 +2,7 @@ from burp import IBurpExtender, IContextMenuFactory, IContextMenuInvocation
 from burp import IParameter, IRequestInfo
 from java.net import URL, URLClassLoader
 from java.lang import Thread as JavaThread
-from javax.swing import JMenuItem
+from javax.swing import JMenuItem, JOptionPane
 import array
 
 import xmltodict
@@ -168,6 +168,7 @@ class Minimizer(object):
 
             if replace:
                 self.replace_live(current_req, True)
+                JOptionPane.showMessageDialog(None, "Minimized request")
             else:
                 self._cb.sendToRepeater(
                         self._httpServ.getHost(),
